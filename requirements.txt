@@ -1,4 +1,5 @@
 streamlit
-opencv-python
-pytube
+opencv-python-headless
+yt-dlp
 fpdf
+# force rebuild
