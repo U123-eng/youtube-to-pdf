@@ -3,3 +3,4 @@ opencv-python-headless
 yt-dlp
 fpdf
 scikit-image
+openai-whisper
