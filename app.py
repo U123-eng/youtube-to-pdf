@@ -8,7 +8,7 @@ from PIL import Image
 import yt_dlp
 from skimage.metrics import structural_similarity as ssim
 
-# Extract video ID from various YouTube URL formats
+# --- Extract video ID ---
 def get_video_id(url):
     patterns = [r"shorts\/([\w\-]+)", r"youtu\.be\/([\w\-]+)", r"v=([\w\-]+)", r"live\/([\w\-]+)"]
     for pattern in patterns:
@@ -17,11 +17,12 @@ def get_video_id(url):
             return match.group(1)
     return None
 
-# Updated download function that avoids needing ffmpeg
+# --- Download video from YouTube without ffmpeg (safe for Streamlit Cloud) ---
 def download_video(url, filename="video.mp4"):
     ydl_opts = {
         'outtmpl': filename,
-        'format': 'mp4',  # Ensure single format is used to avoid merging
+        'format': 'best[ext=mp4]/mp4',  # Avoids merging, no ffmpeg needed
+        'noplaylist': True,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -31,7 +32,7 @@ def download_video(url, filename="video.mp4"):
         st.error(f"Download error: {e}")
         return None
 
-# Extract unique frames using SSIM
+# --- Extract Unique Frames using SSIM ---
 def extract_unique_frames(video_file, output_folder, n=3, ssim_threshold=0.8):
     cap = cv2.VideoCapture(video_file)
     fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -69,7 +70,7 @@ def extract_unique_frames(video_file, output_folder, n=3, ssim_threshold=0.8):
     cap.release()
     return timestamps
 
-# Convert frames to PDF
+# --- Convert frames to PDF ---
 def convert_frames_to_pdf(input_folder, output_pdf, timestamps):
     pdf = FPDF("L")
     pdf.set_auto_page_break(0)
@@ -88,11 +89,12 @@ def convert_frames_to_pdf(input_folder, output_pdf, timestamps):
 
     pdf.output(output_pdf)
 
-# Streamlit UI
-st.title("YouTube Video to PDF Converter")
-st.markdown("Upload a YouTube video link, and this app will generate a PDF of key frames with timestamps.")
+# --- Streamlit UI ---
+st.set_page_config(page_title="YouTube to PDF", layout="wide")
+st.title("🎥 YouTube Video to PDF Generator")
+st.markdown("🔗 Paste a YouTube video or Shorts link below. This tool will download the video, extract key frames, and generate a PDF summary with timestamps.")
 
-url = st.text_input("Enter YouTube URL")
+url = st.text_input("Enter YouTube Video URL:")
 
 if st.button("Generate PDF"):
     if not url:
