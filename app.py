@@ -2,13 +2,13 @@ import streamlit as st
 import os
 import cv2
 import tempfile
+import re
 from fpdf import FPDF
 from PIL import Image
 import yt_dlp
 from skimage.metrics import structural_similarity as ssim
-import re
 
-# Extract video ID from YouTube URL
+# Extract video ID from various YouTube URL formats
 def get_video_id(url):
     patterns = [r"shorts\/([\w\-]+)", r"youtu\.be\/([\w\-]+)", r"v=([\w\-]+)", r"live\/([\w\-]+)"]
     for pattern in patterns:
@@ -17,12 +17,11 @@ def get_video_id(url):
             return match.group(1)
     return None
 
-# Download YouTube video using yt-dlp
+# Updated download function that avoids needing ffmpeg
 def download_video(url, filename="video.mp4"):
     ydl_opts = {
         'outtmpl': filename,
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4',
-        'merge_output_format': 'mp4'
+        'format': 'mp4',  # Ensure single format is used to avoid merging
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -70,10 +69,11 @@ def extract_unique_frames(video_file, output_folder, n=3, ssim_threshold=0.8):
     cap.release()
     return timestamps
 
-# Convert frames to PDF with timestamps
+# Convert frames to PDF
 def convert_frames_to_pdf(input_folder, output_pdf, timestamps):
     pdf = FPDF("L")
     pdf.set_auto_page_break(0)
+
     files = sorted(os.listdir(input_folder), key=lambda x: int(x.replace("frame", "").replace(".png", "")))
     for i, (filename, (_, seconds)) in enumerate(zip(files, timestamps)):
         img_path = os.path.join(input_folder, filename)
@@ -93,27 +93,31 @@ st.title("YouTube Video to PDF Converter")
 st.markdown("Upload a YouTube video link, and this app will generate a PDF of key frames with timestamps.")
 
 url = st.text_input("Enter YouTube URL")
+
 if st.button("Generate PDF"):
     if not url:
         st.warning("Please enter a YouTube link.")
     else:
-        with st.spinner("Processing video..."):
+        with st.spinner("Processing video, extracting frames and generating PDF..."):
             video_id = get_video_id(url)
             if not video_id:
-                st.error("Invalid YouTube URL.")
+                st.error("Invalid YouTube URL format.")
             else:
-                title = f"video_{video_id}"
+                video_title = f"video_{video_id}"
                 with tempfile.TemporaryDirectory() as tempdir:
                     video_path = os.path.join(tempdir, "video.mp4")
-                    pdf_path = os.path.join(tempdir, f"{title}.pdf")
+                    pdf_path = os.path.join(tempdir, f"{video_title}.pdf")
 
                     result = download_video(url, video_path)
                     if not result:
-                        st.error("Download failed.")
+                        st.error("Video download failed.")
                     else:
                         timestamps = extract_unique_frames(video_path, tempdir)
                         convert_frames_to_pdf(tempdir, pdf_path, timestamps)
 
                         with open(pdf_path, "rb") as f:
-                            st.success("PDF generated successfully!")
-                            st.download_button("Download PDF", f, file_name=f"{title}.pdf", mime="application/pdf")
+                            st.success("✅ PDF Generated Successfully!")
+                            st.download_button(label="📄 Download PDF",
+                                               data=f,
+                                               file_name=f"{video_title}.pdf",
+                                               mime="application/pdf")
