@@ -1,6 +1,6 @@
 streamlit
 opencv-python-headless
-yt-dlp
 fpdf
+Pillow
+yt-dlp
 scikit-image
-openai-whisper
