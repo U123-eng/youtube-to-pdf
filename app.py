@@ -1,62 +1,104 @@
-import streamlit as st
-from pytube import YouTube
 import os
-from moviepy.editor import VideoFileClip
-from fpdf import FPDF
-from PIL import Image
+import streamlit as st
 import tempfile
 import shutil
+from fpdf import FPDF
+import cv2
+import numpy as np
+import whisper
+from PIL import Image
+from yt_dlp import YoutubeDL
 
-st.set_page_config(page_title="YouTube Video to PDF", layout="centered")
-st.title("📄 YouTube Video to PDF Converter")
-st.write("Paste a YouTube video link and generate a PDF with frames and timestamps.")
+st.title("🎬 YouTube Video to PDF Converter")
 
-url = st.text_input("Enter YouTube Video URL:")
+def download_audio(video_url, output_path):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(output_path, 'audio.%(ext)s'),
+        'quiet': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+        }],
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
+    return os.path.join(output_path, 'audio.mp3')
 
-if st.button("Generate PDF") and url:
-    try:
-        with st.spinner("Downloading video..."):
-            yt = YouTube(url)
-            video_stream = yt.streams.filter(file_extension='mp4', progressive=True).first()
-            if not video_stream:
-                st.error("No MP4 stream available.")
-                st.stop()
+def download_video(video_url, output_path):
+    ydl_opts = {
+        'format': 'mp4',
+        'outtmpl': os.path.join(output_path, 'video.%(ext)s'),
+        'quiet': True
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
+    return os.path.join(output_path, 'video.mp4')
 
+def extract_keyframes(video_path, output_folder, interval=5):
+    cap = cv2.VideoCapture(video_path)
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    saved_frames = []
+
+    for i in range(0, frame_count, interval * fps):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_path = os.path.join(output_folder, f"frame_{i}.png")
+        cv2.imwrite(frame_path, frame)
+        saved_frames.append((i // fps, frame_path))
+    cap.release()
+    return saved_frames
+
+def transcribe_audio(audio_path):
+    model = whisper.load_model("base")
+    result = model.transcribe(audio_path)
+    return result['segments']
+
+def convert_to_pdf(frames, transcript, output_pdf):
+    pdf = FPDF()
+    for time_sec, frame_path in frames:
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.cell(200, 10, txt=f"Timestamp: {time_sec}s", ln=True)
+        img = Image.open(frame_path)
+        img = img.convert('RGB')
+        temp_img_path = frame_path.replace(".png", "_resized.jpg")
+        img.save(temp_img_path)
+
+        pdf.image(temp_img_path, x=10, y=20, w=180)
+
+        matching_texts = [seg['text'] for seg in transcript if int(seg['start']) <= time_sec <= int(seg['end'])]
+        text_block = "\n".join(matching_texts) if matching_texts else "No matching text found."
+
+        pdf.ln(85)
+        pdf.multi_cell(0, 10, text_block)
+    pdf.output(output_pdf)
+
+st.write("Paste a YouTube video URL below to generate a PDF of frames + transcript.")
+
+video_url = st.text_input("Enter YouTube Video URL:")
+
+if st.button("Generate PDF"):
+    if video_url.strip() == "":
+        st.warning("Please enter a valid YouTube URL.")
+    else:
+        with st.spinner("Processing..."):
             tempdir = tempfile.mkdtemp()
-            video_path = os.path.join(tempdir, "video.mp4")
-            video_stream.download(output_path=tempdir, filename="video.mp4")
+            try:
+                audio_path = download_audio(video_url, tempdir)
+                video_path = download_video(video_url, tempdir)
+                transcript = transcribe_audio(audio_path)
+                frames = extract_keyframes(video_path, tempdir, interval=5)
+                output_pdf_path = os.path.join(tempdir, "output.pdf")
+                convert_to_pdf(frames, transcript, output_pdf_path)
 
-        with st.spinner("Extracting frames..."):
-            clip = VideoFileClip(video_path)
-            duration = int(clip.duration)
-            frame_folder = os.path.join(tempdir, "frames")
-            os.makedirs(frame_folder, exist_ok=True)
-
-            timestamps = []
-            for t in range(0, duration, max(1, duration // 10)):  # 10 frames max
-                frame_path = os.path.join(frame_folder, f"frame_{t}.png")
-                clip.save_frame(frame_path, t)
-                timestamps.append((frame_path, t))
-
-        with st.spinner("Creating PDF..."):
-            pdf = FPDF()
-            pdf.set_auto_page_break(auto=True, margin=15)
-
-            for frame_path, t in timestamps:
-                pdf.add_page()
-                pdf.set_font("Arial", size=12)
-                pdf.cell(200, 10, txt=f"Timestamp: {t} sec", ln=True)
-                pdf.image(frame_path, x=10, y=30, w=pdf.w - 20)
-
-            pdf_path = os.path.join(tempdir, "output.pdf")
-            pdf.output(pdf_path)
-
-        with open(pdf_path, "rb") as f:
-            st.success("PDF generated successfully!")
-            st.download_button("📥 Download PDF", f, file_name="video_summary.pdf")
-
-    except Exception as e:
-        st.error(f"Error: {e}")
-    finally:
-        if 'tempdir' in locals():
-            shutil.rmtree(tempdir, ignore_errors=True)
+                with open(output_pdf_path, "rb") as f:
+                    st.success("PDF Generated Successfully!")
+                    st.download_button("Download PDF", f, file_name="youtube_summary.pdf")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                shutil.rmtree(tempdir)
