@@ -1,104 +1,188 @@
-import os
-import streamlit as st
-import tempfile
-import shutil
-from fpdf import FPDF
+!pip install opencv-python-headless
+!pip install scikit-image
+!pip install fpdf
+!pip install yt-dlp
+
+import sys
+from PIL import ImageFile
+sys.modules['ImageFile'] = ImageFile
 import cv2
-import numpy as np
-import whisper
+import os
+import tempfile
+import re
+from fpdf import FPDF
 from PIL import Image
-from yt_dlp import YoutubeDL
+import yt_dlp
+from skimage.metrics import structural_similarity as ssim
+from scipy.spatial import distance
+from google.colab import files
 
-st.title("🎬 YouTube Video to PDF Converter")
-
-def download_audio(video_url, output_path):
+def download_video(url, filename, max_retries=3):
     ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': os.path.join(output_path, 'audio.%(ext)s'),
-        'quiet': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-        }],
+        'outtmpl': filename,
+        'format': 'best',
     }
-    with YoutubeDL(ydl_opts) as ydl:
-        ydl.download([video_url])
-    return os.path.join(output_path, 'audio.mp3')
+    retries = 0
+    while retries < max_retries:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  
+                ydl.download([url])
+                return filename
+        except yt_dlp.utils.DownloadError as e: 
+            print(f"Error downloading video: {e}. Retrying... (Attempt {retries + 1}/{max_retries})")
+            retries += 1
+    raise Exception("Failed to download video after multiple attempts.")
 
-def download_video(video_url, output_path):
+def get_video_id(url):
+    # Match YouTube Shorts URLs
+    video_id_match = re.search(r"shorts\/(\w+)", url)
+    if video_id_match:
+        return video_id_match.group(1)
+
+    # Match youtube.be shortened URLs
+    video_id_match = re.search(r"youtu\.be\/([\w\-_]+)(\?.*)?", url)
+    if video_id_match:
+        return video_id_match.group(1)
+               
+    # Match regular YouTube URLs
+    video_id_match = re.search(r"v=([\w\-_]+)", url)
+    if video_id_match:
+        return video_id_match.group(1)
+
+    # Match YouTube live stream URLs
+    video_id_match = re.search(r"live\/(\w+)", url)  
+    if video_id_match:
+        return video_id_match.group(1)
+
+    return None
+
+def get_playlist_videos(playlist_url):
     ydl_opts = {
-        'format': 'mp4',
-        'outtmpl': os.path.join(output_path, 'video.%(ext)s'),
-        'quiet': True
+        'ignoreerrors': True,
+        'playlistend': 1000,  # Maximum number of videos to fetch
+        'extract_flat': True,
     }
-    with YoutubeDL(ydl_opts) as ydl:
-        ydl.download([video_url])
-    return os.path.join(output_path, 'video.mp4')
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        playlist_info = ydl.extract_info(playlist_url, download=False)
+        return [entry['url'] for entry in playlist_info['entries']]
 
-def extract_keyframes(video_path, output_folder, interval=5):
-    cap = cv2.VideoCapture(video_path)
+def extract_unique_frames(video_file, output_folder, n=3, ssim_threshold=0.8):
+    cap = cv2.VideoCapture(video_file)
     fps = int(cap.get(cv2.CAP_PROP_FPS))
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    saved_frames = []
+    last_frame = None
+    saved_frame = None
+    frame_number = 0
+    last_saved_frame_number = -1
+    timestamps = []
 
-    for i in range(0, frame_count, interval * fps):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+    while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-        frame_path = os.path.join(output_folder, f"frame_{i}.png")
-        cv2.imwrite(frame_path, frame)
-        saved_frames.append((i // fps, frame_path))
+
+        if frame_number % n == 0:
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray_frame = cv2.resize(gray_frame, (128, 72))
+
+            if last_frame is not None:
+                similarity = ssim(gray_frame, last_frame, data_range=gray_frame.max() - gray_frame.min())
+
+                if similarity < ssim_threshold:
+                    if saved_frame is not None and frame_number - last_saved_frame_number > fps:
+                        frame_path = os.path.join(output_folder, f'frame{frame_number:04d}_{frame_number // fps}.png')
+                        cv2.imwrite(frame_path, saved_frame)
+                        timestamps.append((frame_number, frame_number // fps))
+
+                    saved_frame = frame
+                    last_saved_frame_number = frame_number
+                else:
+                    saved_frame = frame
+
+            else:
+                frame_path = os.path.join(output_folder, f'frame{frame_number:04d}_{frame_number // fps}.png')
+                cv2.imwrite(frame_path, frame)
+                timestamps.append((frame_number, frame_number // fps))
+                last_saved_frame_number = frame_number
+
+            last_frame = gray_frame
+
+        frame_number += 1
+
     cap.release()
-    return saved_frames
+    return timestamps
 
-def transcribe_audio(audio_path):
-    model = whisper.load_model("base")
-    result = model.transcribe(audio_path)
-    return result['segments']
+def convert_frames_to_pdf(input_folder, output_file, timestamps):
+    frame_files = sorted(os.listdir(input_folder), key=lambda x: int(x.split('_')[0].split('frame')[-1]))
+    pdf = FPDF("L")
+    pdf.set_auto_page_break(0)
 
-def convert_to_pdf(frames, transcript, output_pdf):
-    pdf = FPDF()
-    for time_sec, frame_path in frames:
+    for i, (frame_file, (frame_number, timestamp_seconds)) in enumerate(zip(frame_files, timestamps)):
+        frame_path = os.path.join(input_folder, frame_file)
+        image = Image.open(frame_path)
         pdf.add_page()
+
+        pdf.image(frame_path, x=0, y=0, w=pdf.w, h=pdf.h)
+
+        timestamp = f"{timestamp_seconds // 3600:02d}:{(timestamp_seconds % 3600) // 60:02d}:{timestamp_seconds % 60:02d}"
+        
+        x, y, width, height = 5, 5, 60, 15
+        region = image.crop((x, y, x + width, y + height)).convert("L")
+        mean_pixel_value = region.resize((1, 1)).getpixel((0, 0))
+        if mean_pixel_value < 64:
+            pdf.set_text_color(255, 255, 255)
+        else:
+            pdf.set_text_color(0, 0, 0)
+
+        pdf.set_xy(x, y)
         pdf.set_font("Arial", size=12)
-        pdf.cell(200, 10, txt=f"Timestamp: {time_sec}s", ln=True)
-        img = Image.open(frame_path)
-        img = img.convert('RGB')
-        temp_img_path = frame_path.replace(".png", "_resized.jpg")
-        img.save(temp_img_path)
+        pdf.cell(0, 0, timestamp)
 
-        pdf.image(temp_img_path, x=10, y=20, w=180)
+    pdf.output(output_file)
 
-        matching_texts = [seg['text'] for seg in transcript if int(seg['start']) <= time_sec <= int(seg['end'])]
-        text_block = "\n".join(matching_texts) if matching_texts else "No matching text found."
+def get_video_title(url):
+    ydl_opts = {
+        'skip_download': True,
+        'ignoreerrors': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        video_info = ydl.extract_info(url, download=False)
+        title = video_info['title'].replace('/', '-').replace('\\', '-').replace(':', '-').replace('*', '-').replace('?', '-').replace('<', '-').replace('>', '-').replace('|', '-').replace('"', '-').strip('.')
+        return title
 
-        pdf.ln(85)
-        pdf.multi_cell(0, 10, text_block)
-    pdf.output(output_pdf)
 
-st.write("Paste a YouTube video URL below to generate a PDF of frames + transcript.")
+def main():
+    # Prompt the user for a YouTube video or playlist URL
+    url = input("Enter the YouTube video or playlist URL: ")
+    
+    video_id = get_video_id(url)
+    if video_id:  # It's a normal YouTube URL
+        video_file = download_video(url, "video.mp4")
+        if not video_file:
+            return
+        video_title = get_video_title(url)
+        output_pdf_name = f"{video_title}.pdf"
 
-video_url = st.text_input("Enter YouTube Video URL:")
+        with tempfile.TemporaryDirectory() as temp_folder:
+            timestamps = extract_unique_frames(video_file, temp_folder)
+            convert_frames_to_pdf(temp_folder, output_pdf_name, timestamps)
 
-if st.button("Generate PDF"):
-    if video_url.strip() == "":
-        st.warning("Please enter a valid YouTube URL.")
-    else:
-        with st.spinner("Processing..."):
-            tempdir = tempfile.mkdtemp()
-            try:
-                audio_path = download_audio(video_url, tempdir)
-                video_path = download_video(video_url, tempdir)
-                transcript = transcribe_audio(audio_path)
-                frames = extract_keyframes(video_path, tempdir, interval=5)
-                output_pdf_path = os.path.join(tempdir, "output.pdf")
-                convert_to_pdf(frames, transcript, output_pdf_path)
+        os.remove(video_file)
+        files.download(output_pdf_name)
+    else:  # It's likely a playlist URL
+        video_urls = get_playlist_videos(url)
+        for video_url in video_urls:
+            video_file = download_video(video_url, "video.mp4")
+            if not video_file:
+                continue
+            video_title = get_video_title(video_url)
+            output_pdf_name = f"{video_title}.pdf"
 
-                with open(output_pdf_path, "rb") as f:
-                    st.success("PDF Generated Successfully!")
-                    st.download_button("Download PDF", f, file_name="youtube_summary.pdf")
-            except Exception as e:
-                st.error(f"Error: {e}")
-            finally:
-                shutil.rmtree(tempdir)
+            with tempfile.TemporaryDirectory() as temp_folder:
+                timestamps = extract_unique_frames(video_file, temp_folder)
+                convert_frames_to_pdf(temp_folder, output_pdf_name, timestamps)
+
+            os.remove(video_file)
+            files.download(output_pdf_name)
+
+if __name__ == "__main__":
+    main()  # Run the function to get dynamic input from the user
